@@ -57,6 +57,7 @@ function roomSnapshot(room) {
     hostId: room.hostId,
     started: room.started,
     finished: room.finished,
+    winnerId: room.winnerId || null,
     teams: room.teams.map(t => ({
       id:t.id, name:t.name, players:t.players, pos:t.pos, skip:t.skip, again:t.again,
       connected:t.connected, pending:t.pending, currentPlayer:t.currentPlayer
@@ -73,6 +74,20 @@ function roomSnapshot(room) {
 function emitRoom(room) { io.to(room.code).emit("state", roomSnapshot(room)); }
 function addLog(room, text) { room.log.unshift(text); room.log = room.log.slice(0,50); }
 function findRoom(code) { return rooms.get(String(code||"").toUpperCase()); }
+function resetGame(room) {
+  room.started = false;
+  room.finished = false;
+  room.winnerId = null;
+  room.teams.forEach(t => {
+    t.pos = 0;
+    t.skip = false;
+    t.again = false;
+    t.pending = null;
+    t.currentPlayer = 0;
+  });
+  room.log = [];
+  addLog(room, `🔄 Игра «${room.roomName}» подготовлена к новому раунду.`);
+}
 function cleanTeams(teams, count){
   const list=Array.isArray(teams)?teams:[];
   const n=Math.max(2,Math.min(12,Number(count)||list.length||2));
@@ -101,7 +116,7 @@ io.on("connection", socket=>{
     const safeName=String(roomName||"Газовая трасса").trim().slice(0,60)||"Газовая трасса";
     const c=code();
     const room={
-      code:c, roomName:safeName, hostId:socket.id, started:false, finished:false,
+      code:c, roomName:safeName, hostId:socket.id, started:false, finished:false, winnerId:null,
       teams:cleanTeams(teams,teamCount), questions:DEFAULT_QUESTIONS.map(q=>({...q})),
       log:[], sockets:new Map()
     };
@@ -191,12 +206,17 @@ url: publicUrl(null, c)
       return;
     }
 
+    const fromPos=team.pos;
     const n=Math.floor(Math.random()*6)+1;
-    team.pos=Math.min(PATH.length-1,team.pos+n);
+    const toPos=Math.min(PATH.length-1,team.pos+n);
+    io.to(room.code).emit("diceRoll",{teamId:team.id,result:n,teamName:team.name});
+    io.to(room.code).emit("teamMove",{teamId:team.id,fromPos,toPos,result:n,teamName:team.name});
+    team.pos=toPos;
     addLog(room,`🎲 ${team.name}: выпало ${n}, переход на клетку ${team.pos+1}.`);
 
     if(team.pos>=PATH.length-1){
       room.finished=true;
+      room.winnerId=team.id;
       addLog(room,`🏆 ${team.name} победила!`);
       emitRoom(room);
       return;
@@ -214,6 +234,13 @@ url: publicUrl(null, c)
     if(q) return makePending("question",q);
 
     team.currentPlayer=(team.currentPlayer+1)%4;
+    emitRoom(room);
+  });
+
+  socket.on("newGame", ({code})=>{
+    const room=findRoom(code);
+    if(!room || room.hostId!==socket.id)return;
+    resetGame(room);
     emitRoom(room);
   });
 
